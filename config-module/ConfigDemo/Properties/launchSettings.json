@@ -1,0 +1,9 @@
+{
+  "profiles": {
+    "ConfigDemo": {
+      "commandName": "Project",
+      "commandLineArgs": "--config ../configs/sir-default.json",
+      "workingDirectory": "$(ProjectDir)"
+    }
+  }
+}
