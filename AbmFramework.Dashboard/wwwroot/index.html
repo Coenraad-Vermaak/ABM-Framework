@@ -1,0 +1,2109 @@
+<!doctype html>
+<!--
+    index.html: the ABM.NET dashboard page.
+
+    One page, three columns:
+      left    Simulation settings (sliders, presets, grid size, seed)
+      middle  model title, status, monitors and the grid (drawn by js/grid.js)
+      right   the live chart and the Agent inspector
+    Compare (js/compare.js) and Past runs (js/history.js) open as pop-up windows.
+
+    Live updates come from the server over SignalR (/simulationHub), see the
+    big script block at the bottom. Files and downloads come from the /api
+    controllers. The styles for this page are in the <style> block below;
+    compare.css and history.css style the two pop-up windows.
+-->
+<html>
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>ABM Framework Dashboard</title>
+    <script>
+        // Picks light or dark mode before the page is drawn, so it doesn't
+        // flash white first: the saved choice, otherwise the computer's setting.
+        (() => {
+            let theme = null;
+            try { theme = localStorage.getItem("abmTheme"); } catch { }
+            if (theme !== "light" && theme !== "dark") {
+                theme = window.matchMedia && matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+            }
+            document.documentElement.dataset.theme = theme;
+        })();
+    </script>
+    <link rel="stylesheet" href="css/compare.css?v=2" />
+    <link rel="stylesheet" href="css/history.css?v=1" />
+    <style>
+        /* ---- Colours: light mode here, dark mode below. Everything else uses these var(--...) values. ---- */
+        :root {
+            --bg: #f5f5f5;
+            --panel: #ffffff;
+            --text: #222222;
+            --muted: #666666;
+            --border: #b0b0b0;
+            --line: #dddddd;
+            --soft: #fafafa;
+            --shadow: 0 2px 8px rgba(0, 0, 0, 0.12);
+            --grid-bg: #ffffff;
+            --grid-border: #888888;
+            color-scheme: light;
+        }
+
+        :root[data-theme="dark"] {
+            --bg: #11151d;
+            --panel: #1b2130;
+            --text: #e4e8f0;
+            --muted: #9aa4b8;
+            --border: #3a4458;
+            --line: #2e3648;
+            --soft: #222a3a;
+            --shadow: 0 2px 10px rgba(0, 0, 0, 0.45);
+            --grid-bg: #f2f4f8;
+            --grid-border: #3a4458;
+            color-scheme: dark;
+        }
+
+        select, button, input[type="number"] { color: var(--text); }
+
+        .theme-switch {
+            font-size: 13px;
+            color: #dfe5f2;
+            white-space: nowrap;
+        }
+
+        * { box-sizing: border-box; }
+
+        html, body { height: 100%; }
+
+        body {
+            font-family: Arial, Helvetica, sans-serif;
+            margin: 0;
+            background: var(--bg);
+            color: var(--text);
+            display: flex;
+            flex-direction: column;
+        }
+
+        /* ---- Top bar ---- */
+        header {
+            background: #1f2a44;
+            color: white;
+            padding: 10px 20px;
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            gap: 10px 28px;
+            flex-shrink: 0;
+        }
+
+        header h1 {
+            margin: 0;
+            font-size: 19px;
+            white-space: nowrap;
+        }
+
+        .controls {
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .controls label {
+            font-weight: bold;
+        }
+
+        /* ---- Three-column layout and the draggable gutters between columns ---- */
+        main {
+            --left: 290px;
+            --middle: minmax(0, 1fr);
+            flex: 1;
+            min-height: 0;
+            display: grid;
+            grid-template-columns: var(--left) 14px var(--middle) 14px minmax(280px, 1fr);
+            padding: 16px 20px;
+        }
+
+        .gutter {
+            position: relative;
+            cursor: col-resize;
+            touch-action: none;
+        }
+
+        .gutter.horizontal {
+            flex-shrink: 0;
+            height: 14px;
+            margin: -6px 0;
+            cursor: row-resize;
+        }
+
+        .gutter::after {
+            content: "";
+            position: absolute;
+            border-radius: 3px;
+            background: #c9cfdb;
+            opacity: 0;
+            transition: opacity 0.15s;
+        }
+
+        .gutter:not(.horizontal)::after { top: 0; bottom: 0; left: 5px; width: 4px; }
+        .gutter.horizontal::after { left: 0; right: 0; top: 5px; height: 4px; }
+        .gutter:hover::after, .gutter.dragging::after { opacity: 1; background: #2e6be6; }
+
+        body.resizing { user-select: none; }
+        body.resizing.cols { cursor: col-resize; }
+        body.resizing.rows { cursor: row-resize; }
+
+        .column {
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+            min-height: 0;
+            min-width: 0;
+        }
+
+        .sidebar { overflow-y: auto; }
+
+        /* ---- Buttons, the Download menu and the speed slider ---- */
+        select, button {
+            font-size: 14px;
+            padding: 6px 12px;
+            border-radius: 6px;
+            border: 1px solid var(--border);
+            background: var(--panel);
+        }
+
+        button {
+            cursor: pointer;
+            min-width: 80px;
+        }
+
+        button.primary {
+            background: #2e6be6;
+            border-color: #2e6be6;
+            color: white;
+        }
+
+        #goButton.running {
+            background: #1e7b34;
+            border-color: #1e7b34;
+            color: white;
+        }
+
+        button:disabled {
+            opacity: 0.45;
+            cursor: default;
+        }
+
+        .download-menu { position: relative; display: inline-block; }
+
+        .download-options {
+            position: absolute;
+            top: calc(100% + 4px);
+            left: 0;
+            z-index: 60;
+            display: flex;
+            flex-direction: column;
+            min-width: 150px;
+            padding: 4px;
+            background: var(--panel);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            box-shadow: var(--shadow);
+        }
+
+        .download-options[hidden] { display: none; }
+
+        .download-options button {
+            border: none;
+            text-align: left;
+            background: none;
+        }
+
+        .download-options button:hover, .download-options button:focus { background: var(--soft); outline: none; }
+
+        .speed {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-left: 12px;
+        }
+
+        .speed-end {
+            font-size: 12px;
+            color: #b8c2d8;
+        }
+
+        #speedSlider {
+            width: 130px;
+        }
+
+        #speedLabel {
+            font-size: 13px;
+            color: #dfe5f2;
+            min-width: 90px;
+        }
+
+        /* ---- Settings panel (sliders, number boxes, run options) ---- */
+        #parameterControls { display: grid; grid-template-columns: 1fr; gap: 8px; }
+        .parameter-control { display: grid; grid-template-columns: 1fr auto; gap: 2px 10px; align-items: center; font-size: 13px; }
+        .parameter-control input[type="range"] { grid-column: 1 / -1; width: 100%; margin: 2px 0; }
+        .parameter-control output { color: var(--muted); font-variant-numeric: tabular-nums; }
+        .param-box { display: inline-flex; align-items: center; gap: 3px; color: var(--muted); }
+        .param-box input { width: 72px; padding: 2px 6px; border: 1px solid var(--border); border-radius: 6px; font-size: 13px; text-align: right; background: var(--panel); color: inherit; font-variant-numeric: tabular-nums; }
+        .run-options { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 14px; }
+        .run-options label { display: flex; flex-direction: column; gap: 4px; font-weight: bold; font-size: 12px; }
+        .run-options input { width: 100%; padding: 6px; border: 1px solid var(--border); border-radius: 6px; font-size: 14px; }
+        .run-options select { width: 100%; padding: 6px; border: 1px solid var(--border); border-radius: 6px; font-size: 14px; background: var(--panel); }
+        .run-options .wrap-option { flex-direction: row; align-items: center; gap: 8px; align-self: end; padding-bottom: 8px; }
+        .run-options .wrap-option input { width: auto; }
+        #validationErrors { color: #a52834; white-space: pre-line; font-weight: bold; font-size: 13px; margin: 10px 0 0; }
+        #validationErrors:empty { display: none; }
+
+        /* ---- Model title, status badge and tick counter ---- */
+        .model-heading {
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            gap: 6px 12px;
+        }
+
+        .model-heading h2 {
+            margin: 0;
+            font-size: 20px;
+        }
+
+        .status {
+            font-size: 13px;
+            font-weight: bold;
+            padding: 4px 10px;
+            border-radius: 12px;
+            background: #e0e0e0;
+            color: #444;
+        }
+
+        .status.Ready { background: #e8e0f7; color: #5b3a9e; }
+        .status.Running { background: #d4edda; color: #1e7b34; }
+        .status.Paused { background: #fff3cd; color: #8a6d00; }
+        .status.Completed { background: #d6e4ff; color: #1f4fa8; }
+        .status.Error { background: #f8d7da; color: #a52834; }
+
+        .tick {
+            font-size: 14px;
+            color: var(--muted);
+            font-variant-numeric: tabular-nums;
+        }
+
+        #modelDescription {
+            margin: 4px 0 0;
+            color: var(--muted);
+            font-size: 13px;
+        }
+
+        /* ---- Panels, the grid, its legend and the monitors ---- */
+        .panels {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 20px;
+            align-items: flex-start;
+        }
+
+        .panel {
+            background: var(--panel);
+            border-radius: 10px;
+            padding: 14px 16px;
+            box-shadow: var(--shadow);
+        }
+
+        .panel h3 {
+            margin: 0 0 10px;
+            font-size: 15px;
+        }
+
+        .grid-panel {
+            flex: 1;
+            min-height: 0;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .grid-box {
+            position: relative;
+            flex: 1;
+            min-height: 200px;
+        }
+
+        #grid {
+            position: absolute;
+            inset: 0;
+            margin: auto;
+            display: block;
+            border: 1px solid var(--grid-border);
+            background: var(--grid-bg);
+        }
+
+        #legend {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px 14px;
+            margin-top: 10px;
+            font-size: 13px;
+        }
+
+        #legend:empty { display: none; }
+
+        .legend-item {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .swatch {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            display: inline-block;
+        }
+
+        .swatch.square { border-radius: 2px; }
+
+        .legend-icon {
+            width: 18px;
+            height: 18px;
+        }
+
+        .monitors {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+        }
+
+        .monitors:empty { display: none; }
+
+        .monitor {
+            flex: 1;
+            background: var(--panel);
+            border-radius: 8px;
+            border-top: 4px solid #2e6be6;
+            padding: 6px 12px;
+            min-width: 90px;
+            box-shadow: var(--shadow);
+        }
+
+        .monitor-label {
+            font-size: 12px;
+            color: var(--muted);
+            text-transform: uppercase;
+            letter-spacing: 0.03em;
+        }
+
+        .monitor-value {
+            font-size: 22px;
+            font-weight: bold;
+            font-variant-numeric: tabular-nums;
+            margin-top: 2px;
+        }
+
+        #grid { cursor: pointer; }
+
+        /* ---- The little "i" tooltips ---- */
+        .info {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 14px;
+            height: 14px;
+            margin-left: 5px;
+            border: 1.5px solid currentColor;
+            border-radius: 50%;
+            font: italic bold 10px/1 Georgia, serif;
+            color: var(--muted);
+            cursor: help;
+            vertical-align: 1px;
+            flex-shrink: 0;
+        }
+
+        .info:hover, .info:focus { color: #2e6be6; outline: none; }
+
+        .monitor-label .info, .cmp .info { text-transform: none; letter-spacing: 0; }
+
+        header .info { color: rgba(255, 255, 255, 0.75); }
+        header .info:hover, header .info:focus { color: #fff; }
+
+        .tip-box {
+            position: fixed;
+            z-index: 2000;
+            max-width: 240px;
+            padding: 7px 10px;
+            border-radius: 6px;
+            background: #1f2a44;
+            color: #fff;
+            font-size: 12px;
+            line-height: 1.4;
+            box-shadow: 0 4px 14px rgba(0, 0, 0, 0.25);
+            pointer-events: none;
+        }
+
+        .tip-box[hidden] { display: none; }
+
+        .preset-row {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+            margin-bottom: 12px;
+            font-weight: bold;
+            font-size: 12px;
+        }
+
+        .preset-row select {
+            flex: 1;
+            margin-left: 6px;
+            padding: 5px 8px;
+            font-size: 13px;
+            background: var(--panel);
+        }
+
+        .parameter-control span { display: inline-flex; align-items: center; }
+        .run-options label > span { display: inline-flex; align-items: center; }
+
+        .panel-action {
+            min-width: 0;
+            margin-left: auto;
+            padding: 3px 10px;
+            font-size: 12px;
+            font-weight: normal;
+        }
+
+        .panel-title { display: flex; align-items: center; }
+
+        /* ---- Movable panels (drag a panel's grip onto another to swap them) ---- */
+        .slot {
+            display: flex;
+            flex-direction: column;
+            min-height: 0;
+            min-width: 0;
+        }
+
+        .slot > [data-panel] {
+            flex: 1 1 auto;
+            min-height: 0;
+        }
+
+        .slot[data-slot="rightTop"] { flex: 1 1 auto; min-height: 200px; }
+        .slot[data-slot="rightBottom"] { flex: 0 0 var(--inspector-height, 170px); min-height: 110px; }
+
+        .grid-unit {
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+
+        .parameter-panel, .inspector-panel { overflow-y: auto; }
+
+        .panel-grip {
+            display: inline-block;
+            flex-shrink: 0;
+            width: 10px;
+            height: 16px;
+            margin-right: 8px;
+            vertical-align: -2px;
+            cursor: grab;
+            opacity: 0.4;
+            background-image: radial-gradient(circle, currentColor 1.3px, transparent 1.7px);
+            background-size: 5px 5px;
+        }
+
+        .panel-grip:hover { opacity: 0.9; }
+        .model-heading .panel-grip { margin-right: -4px; }
+
+        body.moving-panel [data-panel] { transition: opacity 0.15s; }
+        body.moving-panel .slot:not(.drop-target) > [data-panel] { opacity: 0.75; }
+
+        .slot.drop-target > [data-panel] {
+            outline: 2px dashed #2e6be6;
+            outline-offset: 3px;
+            border-radius: 10px;
+        }
+
+        .layout-reset {
+            margin-left: auto;
+            min-width: 0;
+            font-size: 13px;
+            padding: 5px 10px;
+        }
+
+        /* ---- Agent inspector ---- */
+        .inspect-hint {
+            font-size: 13px;
+            color: var(--muted);
+        }
+
+        .inspect-hint[hidden] { display: none; }
+
+        .inspector {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
+            gap: 10px;
+        }
+
+        .inspector-bar {
+            grid-column: 1 / -1;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            font-size: 12px;
+            color: var(--muted);
+        }
+
+        .inspector-bar button {
+            min-width: 0;
+            padding: 3px 10px;
+            font-size: 12px;
+        }
+
+        .inspector-card {
+            position: relative;
+            border: 1px solid var(--line);
+            border-left: 5px solid #999;
+            border-radius: 8px;
+            padding: 10px 14px;
+            background: var(--soft);
+            font-size: 14px;
+        }
+
+        .inspector[hidden] { display: none; }
+
+        .inspector h4 {
+            display: flex;
+            align-items: center;
+            gap: 7px;
+            margin: 0 0 6px;
+            font-size: 15px;
+        }
+
+        .ring-dot {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            border: 2.5px solid;
+            flex-shrink: 0;
+        }
+
+        .inspector dl {
+            display: grid;
+            grid-template-columns: max-content 1fr;
+            gap: 3px 14px;
+            margin: 0;
+        }
+
+        .inspector dt { color: var(--muted); }
+        .inspector dd { margin: 0; font-variant-numeric: tabular-nums; }
+
+        .inspector .inspector-note {
+            margin-top: 6px;
+            font-size: 12px;
+            color: var(--muted);
+        }
+
+        .inspector-close {
+            position: absolute;
+            top: 6px;
+            right: 6px;
+            min-width: 0;
+            padding: 0 7px;
+            font-size: 16px;
+            line-height: 22px;
+            border: none;
+            background: transparent;
+            color: var(--muted);
+        }
+
+        /* ---- Display switches (Show grass, Show energy, ...) ---- */
+        .display-switches {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px 18px;
+            margin-top: 10px;
+            font-size: 13px;
+        }
+
+        .display-switches.none { display: none; }
+
+        .switch {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            cursor: pointer;
+            user-select: none;
+        }
+
+        .switch[hidden] { display: none; }
+
+        .switch input {
+            position: absolute;
+            opacity: 0;
+            width: 0;
+            height: 0;
+        }
+
+        .switch .slider {
+            position: relative;
+            width: 34px;
+            height: 18px;
+            border-radius: 9px;
+            background: #c4c4c4;
+            transition: background 0.15s;
+            flex-shrink: 0;
+        }
+
+        .switch .slider::after {
+            content: "";
+            position: absolute;
+            top: 2px;
+            left: 2px;
+            width: 14px;
+            height: 14px;
+            border-radius: 50%;
+            background: var(--panel);
+            transition: transform 0.15s;
+        }
+
+        .switch input:checked + .slider { background: #2e6be6; }
+        .switch input:checked + .slider::after { transform: translateX(16px); }
+        .switch input:focus-visible + .slider { outline: 2px solid #2e6be6; outline-offset: 2px; }
+
+        .switch-hint {
+            color: var(--muted);
+            font-style: italic;
+        }
+
+        .chart-panel {
+            flex: 1;
+            min-height: 0;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .chart-wrap {
+            position: relative;
+            flex: 1;
+            min-height: 0;
+        }
+
+        @media (max-width: 1100px), (max-height: 560px) {
+            body { display: block; height: auto; }
+            main { display: flex; flex-direction: column; }
+            .grid-box { flex: none; height: min(90vw, 560px); }
+            .chart-panel { flex: none; }
+            .chart-wrap { flex: none; height: 360px; }
+            .gutter { display: none; }
+            .slot[data-slot="rightBottom"], .slot[data-slot="rightTop"] { flex: none; }
+            .grid-unit { flex: none; }
+        }
+    </style>
+</head>
+<body>
+    <!-- Top bar: model picker, Setup / Run / Step / Reset, Download, Past runs,
+         speed, Reset layout and dark mode. Compare adds its own button here. -->
+    <header>
+        <h1>ABM Framework Dashboard</h1>
+        <div class="controls">
+            <label for="modelSelect">Model:</label>
+            <select id="modelSelect"></select>
+            <button id="setupButton" class="primary" title="Create the agents with the current settings">Setup</button>
+            <button id="goButton" disabled title="Run until paused">Run</button>
+            <button id="stepButton" disabled title="Run a single tick">Step</button>
+            <button id="resetButton" disabled>Reset</button><span class="info" tabindex="0" data-tip="Setup builds the world with your settings but does not run it yet, so you can check it first. Run plays it, press it again to pause. Step moves forward one tick at a time. Reset clears everything.">i</span>
+            <div class="download-menu">
+                <button id="downloadButton" disabled aria-haspopup="true" aria-expanded="false" title="Download the statistics of every tick in this run">Download &#9662;</button>
+                <div id="downloadOptions" class="download-options" role="menu" hidden>
+                    <button type="button" role="menuitem" data-format="xlsx">Excel (.xlsx)</button>
+                    <button type="button" role="menuitem" data-format="csv">CSV</button>
+                </div>
+            </div>
+            <button id="historyButton" title="See the runs and comparisons saved in the database">Past runs</button>
+            <div class="speed">
+                <label for="speedSlider">Speed:</label>
+                <span class="speed-end">Slow</span>
+                <input type="range" id="speedSlider" min="1" max="10" step="1" value="6" />
+                <span class="speed-end">Fast</span>
+                <span id="speedLabel"></span>
+            </div>
+        </div>
+        <button id="resetLayoutButton" class="layout-reset" title="Put the panels and sizes back to how they started">Reset layout</button>
+        <label class="switch theme-switch" for="themeToggle">
+            <input type="checkbox" id="themeToggle" />
+            <span class="slider"></span> Dark mode
+        </label>
+    </header>
+
+    <main>
+        <!-- Left column: simulation settings. Its sliders are built by
+             renderConfiguration() in the script below. -->
+        <aside class="column sidebar slot" data-slot="left">
+            <div class="panel parameter-panel" data-panel="settings">
+                <h3><span class="panel-grip" title="Drag to move this panel" aria-hidden="true"></span>Simulation settings</h3>
+                <label for="presetSelect" class="preset-row">Preset<span class="info" tabindex="0" data-tip="Ready-made settings for this model. Pick one to fill in all the sliders, then change anything you like.">i</span>
+                    <select id="presetSelect"></select>
+                </label>
+                <div id="parameterControls"></div>
+                <div class="run-options">
+                    <label for="gridWidth"><span>Grid width<span class="info" tabindex="0" data-tip="How many cells wide the world is (5 to 200).">i</span></span>
+                        <input id="gridWidth" type="number" min="5" max="200" step="1" />
+                    </label>
+                    <label for="gridHeight"><span>Grid height<span class="info" tabindex="0" data-tip="How many cells tall the world is (5 to 200).">i</span></span>
+                        <input id="gridHeight" type="number" min="5" max="200" step="1" />
+                    </label>
+                    <label for="scheduler"><span>Scheduling<span class="info" tabindex="0" data-tip="The order agents take their turn each tick. Random order shuffles them every tick so no agent always goes first. Same order uses a fixed order every tick.">i</span></span>
+                        <select id="scheduler">
+                            <option value="Random">Random order</option>
+                            <option value="Sequential">Same order</option>
+                        </select>
+                    </label>
+                    <label for="wrapEdges" class="wrap-option">
+                        <input id="wrapEdges" type="checkbox" /> Wrap around edges<span class="info" tabindex="0" data-tip="When on, an agent walking off one edge comes back on the opposite side, like the world is a donut. When off, the edges are walls.">i</span>
+                    </label>
+                    <label for="tickLimit"><span>Run length (ticks)<span class="info" tabindex="0" data-tip="How many ticks the run lasts before it stops on its own.">i</span></span>
+                        <input id="tickLimit" type="number" min="1" max="1000000" step="1" />
+                    </label>
+                    <label for="randomSeed"><span>Random seed<span class="info" tabindex="0" data-tip="Leave blank for a different run every time. Type a number to get exactly the same run again with the same settings.">i</span></span>
+                        <input id="randomSeed" type="number" step="1" placeholder="No seed" />
+                    </label>
+                </div>
+                <div id="validationErrors" role="alert" aria-live="polite"></div>
+            </div>
+        </aside>
+
+        <div class="gutter" data-resize="left" title="Drag to resize. Double-click to reset."></div>
+
+        <!-- Middle column: model title, status, monitors and the grid canvas. -->
+        <section class="column slot" data-slot="middle">
+            <div class="grid-unit" data-panel="grid">
+            <div>
+                <div class="model-heading">
+                    <span class="panel-grip" title="Drag to move this panel" aria-hidden="true"></span>
+                    <h2 id="modelTitle">No simulation running</h2>
+                    <span id="statusBadge" class="status">Stopped</span>
+                    <span id="tickCounter" class="tick"></span>
+                    <button id="saveGridImage" class="panel-action" title="Save the grid as a PNG image">Save image</button>
+                </div>
+                <p id="modelDescription">Pick a model, press Setup, then Run.</p>
+            </div>
+
+            <div class="panel grid-panel">
+                <div id="gridBox" class="grid-box">
+                    <canvas id="grid"></canvas>
+                </div>
+                <div id="legend"></div>
+                <div id="displaySwitches" class="display-switches">
+                    <label class="switch" data-models="AntForaging">
+                        <input type="checkbox" id="showPheromone" data-option="showPheromone" checked />
+                        <span class="slider"></span> Show pheromone trails<span class="info" tabindex="0" data-tip="The scent ants drop on their way back to the nest with food. Darker means stronger. Trails fade a little every tick, and other ants follow them to the food.">i</span>
+                    </label>
+                    <label class="switch" data-models="AntForaging">
+                        <input type="checkbox" id="showFood" data-option="showFood" checked />
+                        <span class="slider"></span> Show food and nest<span class="info" tabindex="0" data-tip="Shows the food piles and the anthill. The ants still use them when this is off, you just can't see them.">i</span>
+                    </label>
+                    <label class="switch" data-models="WolfSheep">
+                        <input type="checkbox" id="showGrass" data-option="showGrass" checked />
+                        <span class="slider"></span> Show grass<span class="info" tabindex="0" data-tip="Green cells have grass the sheep can eat. Brown cells were eaten and are waiting to grow back.">i</span>
+                    </label>
+                    <label class="switch" data-models="WolfSheep">
+                        <input type="checkbox" id="showEnergy" data-option="showEnergy" />
+                        <span class="slider"></span> Show energy<span class="info" tabindex="0" data-tip="Shows each sheep and wolf's energy. They lose some every tick, gain some by eating, and die at 0. Only fits on smaller grids.">i</span>
+                    </label>
+                    <span id="energyHint" class="switch-hint" hidden>Grid too big to fit energy labels.</span>
+                </div>
+            </div>
+            </div>
+        </section>
+
+        <div class="gutter" data-resize="middle" title="Drag to resize. Double-click to reset."></div>
+
+        <!-- Right column: the live chart, and the Agent inspector below it. -->
+        <section class="column" id="rightColumn">
+            <div id="monitors" class="monitors"></div>
+
+            <div class="slot" data-slot="rightTop">
+                <div class="panel chart-panel" data-panel="chart">
+                    <h3 class="panel-title"><span class="panel-grip" title="Drag to move this panel" aria-hidden="true"></span><span id="chartTitle">Statistics</span><button id="saveChartImage" class="panel-action" title="Save the chart as a PNG image">Save image</button></h3>
+                    <div class="chart-wrap">
+                        <canvas id="statsChart"></canvas>
+                    </div>
+                </div>
+            </div>
+
+            <div class="gutter horizontal" data-resize="inspector" title="Drag to resize. Double-click to reset."></div>
+
+            <div class="slot" data-slot="rightBottom" id="inspectorSlot">
+                <div class="panel inspector-panel" data-panel="inspector">
+                    <h3><span class="panel-grip" title="Drag to move this panel" aria-hidden="true"></span>Agent inspector</h3>
+                    <div id="inspectHint" class="inspect-hint">Click an agent on the grid to see its details. Ctrl+click to add more (up to 6).</div>
+                    <div id="inspector" class="inspector" hidden></div>
+                </div>
+            </div>
+        </section>
+    </main>
+    <div id="tipBox" class="tip-box" role="tooltip" hidden></div>
+
+    <!-- OUTSIDE LIBRARIES
+         These two aren't in our project. The browser downloads them from
+         jsDelivr (a free CDN), so the page needs internet the first time.
+           Chart.js  = the line chart
+           SignalR   = the live connection to the server
+         The number after the @ is the exact version. It's fixed on purpose,
+         so the page always loads the version we built and tested with.
+         Don't change it to @latest, or a new release could break the page
+         without anyone touching the code.
+
+         To update one: find the newest version on npmjs.com (search
+         "chart.js" or "@microsoft/signalr"), change the number below, then
+         test the chart, Setup, Run, Compare and Past runs. Check the
+         browser console (F12) for errors.
+
+         Then our own scripts. grid.js must load before the main script
+         below, which uses it. The ?v=... numbers make browsers fetch a fresh
+         copy after a change: bump the number when you edit that file. -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.6.1"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@microsoft/signalr@10.0.11/dist/browser/signalr.min.js"></script>
+    <script src="js/grid.js?v=4"></script>
+    <script src="js/compare.js?v=5"></script>
+    <script src="js/history.js?v=3"></script>
+
+    <script>
+        // =====================================================================
+        // The dashboard's main script.
+        //
+        // Sections, in order:
+        //   1. Page elements and the speed slider
+        //   2. Settings panel: run options, sliders, presets, limits, tooltips
+        //   3. Save image buttons
+        //   4. Chart (Chart.js) and dark mode
+        //   5. Monitors (the number boxes above the chart) and adding ticks
+        //   6. Run status, showing a new run, Continue from Past runs
+        //   7. Display switches and the Agent inspector
+        //   8. Resizable columns and draggable panels (saved in localStorage)
+        //   9. Clicking agents on the grid
+        //  10. SignalR: messages from the server, and the buttons that call it
+        //  11. Download menu and start-up
+        //
+        // Server side: Hubs/SimulationHub.cs and LiveSimulation.cs.
+        // Grid drawing lives in js/grid.js (loaded above), so functions like
+        // drawGrid, setGridSize and lastAgents come from there.
+        //
+        // Naming: the server sends C# property names in camelCase, so the
+        // SimulationConfig property "InitialSheep" is "initialSheep" here.
+        // =====================================================================
+
+        // ---- 1. Page elements and the speed slider ----------------------------
+
+        const modelSelect = document.getElementById("modelSelect");
+        const setupButton = document.getElementById("setupButton");
+        const goButton = document.getElementById("goButton");
+        const stepButton = document.getElementById("stepButton");
+        const resetButton = document.getElementById("resetButton");
+        const downloadButton = document.getElementById("downloadButton");
+        const modelTitle = document.getElementById("modelTitle");
+        const modelDescription = document.getElementById("modelDescription");
+        const statusBadge = document.getElementById("statusBadge");
+        const tickCounter = document.getElementById("tickCounter");
+        const chartTitle = document.getElementById("chartTitle");
+        const speedSlider = document.getElementById("speedSlider");
+        const speedLabel = document.getElementById("speedLabel");
+
+        // The speed slider has 10 steps. Each step is a delay between ticks in
+        // milliseconds (1000 = 1 tick a second, 10 = about 100 a second).
+        const speedLevels = [1000, 500, 250, 150, 100, 50, 30, 20, 15, 10];
+        let speedTimer = null;
+
+        // Shows the speed as "~20 ticks/sec" next to the slider.
+        function showSpeed(delayMs) {
+            const ticksPerSecond = Math.round(1000 / delayMs);
+            speedLabel.textContent = `~${ticksPerSecond} tick${ticksPerSecond === 1 ? "" : "s"}/sec`;
+        }
+
+        // The slider step (1 to 10) closest to a delay sent by the server.
+        function levelForDelay(delayMs) {
+            let best = 0;
+            speedLevels.forEach((d, i) => {
+                if (Math.abs(d - delayMs) < Math.abs(speedLevels[best] - delayMs)) best = i;
+            });
+            return best + 1;
+        }
+
+        // ---- 2. Settings panel ----------------------------------------------
+        //
+        // How settings are stored: modelDefaults[model] holds the server's
+        // defaults (ModelCatalog.cs). pendingConfigs[model] holds what the user
+        // has set for that model so far, so switching models and back keeps
+        // their changes. activePending is the config being edited right now
+        // and is exactly what Setup sends to the server.
+
+        const parameterControls = document.getElementById("parameterControls");
+        const tickLimitInput = document.getElementById("tickLimit");
+        const randomSeedInput = document.getElementById("randomSeed");
+        const gridWidthInput = document.getElementById("gridWidth");
+        const gridHeightInput = document.getElementById("gridHeight");
+        const schedulerInput = document.getElementById("scheduler");
+        const wrapEdgesInput = document.getElementById("wrapEdges");
+
+        // Copies the boxes under the sliders into the pending settings, as typed.
+        function readRunOptions() {
+            activePending.tickLimit = Number(tickLimitInput.value);
+            activePending.randomSeed = randomSeedInput.value === "" ? null : Number(randomSeedInput.value);
+            activePending.gridWidth = Number(gridWidthInput.value);
+            activePending.gridHeight = Number(gridHeightInput.value);
+            activePending.scheduler = schedulerInput.value;
+            activePending.topology = wrapEdgesInput.checked ? "Toroidal" : "Bounded";
+        }
+
+        // Puts the pending settings into the boxes under the sliders.
+        function fillRunOptions() {
+            tickLimitInput.value = activePending.tickLimit;
+            randomSeedInput.value = activePending.randomSeed ?? "";
+            gridWidthInput.value = activePending.gridWidth;
+            gridHeightInput.value = activePending.gridHeight;
+            schedulerInput.value = activePending.scheduler;
+            wrapEdgesInput.checked = activePending.topology === "Toroidal";
+        }
+
+        // Returns an error message, or null when the boxes hold valid values.
+        // A quick check for the user. The server validates everything again.
+        function checkRunOptions() {
+            const whole = (text, min, max) => /^-?\d+$/.test(text) && Number(text) >= min && Number(text) <= max;
+            if (!whole(gridWidthInput.value.trim(), 5, 200) || !whole(gridHeightInput.value.trim(), 5, 200)) {
+                return "Grid width and height must be whole numbers from 5 to 200.";
+            }
+            if (!whole(tickLimitInput.value.trim(), 1, 1000000)) {
+                return "Run length must be an integer from 1 to 1,000,000.";
+            }
+            const seedText = randomSeedInput.value.trim();
+            if (seedText !== "" && !whole(seedText, -2147483648, 2147483647)) {
+                return "Random seed must be a whole number between -2,147,483,648 and 2,147,483,647, or left blank.";
+            }
+            const width = Number(gridWidthInput.value), height = Number(gridHeightInput.value);
+            const agents = modelSelect.value === "WolfSheep"
+                ? (activePending.initialSheep || 0) + (activePending.initialWolves || 0)
+                : (activePending.agentCount || 0);
+            if (agents > width * height) {
+                return `Too many agents for a ${width} x ${height} grid. It only has ${width * height} cells but you asked for ${agents} agents. Make the grid bigger or use fewer agents.`;
+            }
+            return null;
+        }
+        const validationErrors = document.getElementById("validationErrors");
+
+        // The sliders for each model:
+        //   [SimulationConfig property, label, min, max, step, shown as a percent?]
+        // ADD A MODEL: add its sliders here (and tips below, presets if you like).
+        const parameterDefinitions = {
+            SIR: [
+                ["AgentCount", "Number of agents", 1, 10000, 1], ["InitialInfected", "Initial infected", 0, 10000, 1],
+                ["InfectionProbability", "Infection chance", 0, 1, 0.01, true], ["RecoveryTicks", "Recovery time (ticks)", 1, 500, 1]
+            ],
+            Schelling: [["AgentCount", "Number of agents", 1, 10000, 1], ["SimilarityThreshold", "Similarity threshold", 0, 1, 0.01, true], ["GroupARatio", "% in group A", 0, 1, 0.01, true]],
+            Boids: [["AgentCount", "Number of boids", 1, 10000, 1], ["PerceptionRadius", "Vision radius", 0.1, 20, 0.1], ["SeparationWeight", "Separation", 0, 10, 0.1], ["AlignmentWeight", "Alignment", 0, 10, 0.1], ["CohesionWeight", "Cohesion", 0, 10, 0.1], ["MaxSpeed", "Maximum speed", 0.1, 10, 0.1]],
+            AntForaging: [["AgentCount", "Number of ants", 1, 10000, 1], ["FoodSources", "Number of food piles", 1, 100, 1], ["FoodPerSource", "Food per pile", 1, 1000, 1], ["PheromoneDepositAmount", "Pheromone dropped", 0, 100, 0.1], ["PheromoneDecayRate", "Pheromone decay rate", 0, 1, 0.01], ["ExplorationChance", "Exploration chance", 0, 1, 0.01, true]],
+            WolfSheep: [["InitialSheep", "Initial sheep", 0, 10000, 1], ["InitialWolves", "Initial wolves", 0, 10000, 1], ["GrassRegrowthProbability", "Grass regrowth chance", 0, 1, 0.01, true], ["GrassEnergyGain", "Sheep gain from food", 0.1, 100, 0.1], ["SheepEnergyGain", "Wolf gain from food", 0.1, 100, 0.1], ["SheepReproductionProbability", "Sheep reproduce", 0, 1, 0.01, true], ["WolfReproductionProbability", "Wolf reproduce", 0, 1, 0.01, true]]
+        };
+        // The text shown when hovering the little "i" next to a slider.
+        const parameterTips = {
+            AgentCount: "How many agents are placed on the grid at the start.",
+            InitialInfected: "How many agents start off infected.",
+            InfectionProbability: "The chance each tick that an infected agent infects a healthy neighbour.",
+            RecoveryTicks: "How many ticks an agent stays infected before it recovers.",
+            SimilarityThreshold: "The share of neighbours that must be like an agent for it to be happy and stay put.",
+            GroupARatio: "The share of agents that belong to group A. The rest are group B.",
+            PerceptionRadius: "How far a boid can see other boids, in cells.",
+            SeparationWeight: "How strongly a boid steers away from boids that are too close.",
+            AlignmentWeight: "How strongly a boid turns to match the direction of nearby boids.",
+            CohesionWeight: "How strongly a boid steers towards the middle of nearby boids.",
+            MaxSpeed: "The fastest a boid can move, in cells per tick.",
+            FoodSources: "How many piles of food are placed around the grid.",
+            FoodPerSource: "How much food is in each pile at the start.",
+            PheromoneDepositAmount: "How much pheromone an ant drops on each cell while carrying food home.",
+            PheromoneDecayRate: "How quickly pheromone fades each tick. Higher means trails disappear faster.",
+            ExplorationChance: "The chance an ant ignores the trail and wanders randomly instead.",
+            InitialSheep: "How many sheep start on the grid.",
+            InitialWolves: "How many wolves start on the grid.",
+            GrassRegrowthProbability: "The chance each tick that an eaten patch of grass grows back.",
+            GrassEnergyGain: "How much energy a sheep gets from eating grass.",
+            SheepEnergyGain: "How much energy a wolf gets from eating a sheep.",
+            SheepReproductionProbability: "The chance each tick that a sheep has a lamb.",
+            WolfReproductionProbability: "The chance each tick that a wolf has a cub."
+        };
+
+        // Ready-made settings for each model. Anything not listed keeps the model's default.
+        const presets = {
+            SIR: {
+                "Slow outbreak": { initialInfected: 3, infectionProbability: 0.02, recoveryTicks: 30 },
+                "Fast outbreak": { initialInfected: 5, infectionProbability: 0.25, recoveryTicks: 20 },
+                "Crowded town": { agentCount: 350, infectionProbability: 0.05, recoveryTicks: 40 }
+            },
+            Schelling: {
+                "Tolerant neighbours": { similarityThreshold: 0.3 },
+                "Picky neighbours": { similarityThreshold: 0.75 },
+                "Crowded city": { agentCount: 360 }
+            },
+            Boids: {
+                "Tight flock": { separationWeight: 1, alignmentWeight: 2, cohesionWeight: 2.5 },
+                "Loose swarm": { separationWeight: 2.5, alignmentWeight: 0.3, cohesionWeight: 0.3 },
+                "Fast flyers": { maxSpeed: 2 }
+            },
+            AntForaging: {
+                "Strong trails": { pheromoneDepositAmount: 15, pheromoneDecayRate: 0.005 },
+                "Weak trails": { pheromoneDepositAmount: 2, pheromoneDecayRate: 0.1 },
+                "Curious ants": { explorationChance: 0.4 }
+            },
+            WolfSheep: {
+                "Stable populations": {
+                    gridWidth: 50, gridHeight: 50, topology: "Toroidal", initialSheep: 150, initialWolves: 25,
+                    grassRegrowthProbability: 0.05, grassEnergyGain: 6, sheepEnergyGain: 8,
+                    sheepReproductionProbability: 0.04, wolfReproductionProbability: 0.02
+                },
+                "Few wolves": { initialWolves: 5 }
+            }
+        };
+
+        const presetSelect = document.getElementById("presetSelect");
+        let presetChoice = {};    // the preset picked for each model ("Default", a name, or "Custom")
+
+        // Fills the preset drop-down for a model.
+        function fillPresets(model) {
+            const names = Object.keys(presets[model] || {});
+            presetSelect.innerHTML = ["Default", ...names].map(n => `<option>${n}</option>`).join("") + `<option value="Custom" hidden>Custom</option>`;
+            presetSelect.value = presetChoice[model] || "Default";
+        }
+
+        // Any manual change turns the preset drop-down to "Custom".
+        function markCustom() {
+            presetChoice[modelSelect.value] = "Custom";
+            presetSelect.value = "Custom";
+        }
+
+        // Picking a preset = the model's defaults with the preset's values on top.
+        presetSelect.addEventListener("change", () => {
+            const model = modelSelect.value;
+            const name = presetSelect.value;
+            pendingConfigs[model] = { ...structuredClone(modelDefaults[model]), ...((presets[model] || {})[name] || {}) };
+            activePending = null;
+            presetChoice[model] = name;
+            renderConfiguration(model);
+        });
+
+        let modelDefaults = {};
+        let pendingConfigs = {};
+        let activePending = null;
+        // "InitialSheep" -> "initialSheep" (the JSON name of a C# property).
+        const configKey = name => name[0].toLowerCase() + name.slice(1);
+
+        // Builds the settings panel for a model: one slider plus number box per
+        // entry in parameterDefinitions, then the run options and presets.
+        // Saves whatever was typed for the previous model first.
+        function renderConfiguration(model) {
+            if (activePending) {
+                readRunOptions();
+            }
+            activePending = structuredClone(pendingConfigs[model] || modelDefaults[model]);
+            pendingConfigs[model] = activePending;
+            parameterControls.replaceChildren();
+            (parameterDefinitions[model] || []).forEach(([key, label, min, max, step, percent]) => {
+                const wrap = document.createElement("label");
+                wrap.className = "parameter-control";
+                const caption = document.createElement("span"); caption.textContent = label;
+                if (parameterTips[key]) {
+                    const tip = document.createElement("span");
+                    tip.className = "info"; tip.tabIndex = 0; tip.textContent = "i"; tip.dataset.tip = parameterTips[key];
+                    caption.append(tip);
+                }
+                const input = document.createElement("input");
+                input.type = "range"; input.min = min; input.max = max; input.step = step;
+                input.value = activePending[configKey(key)]; input.setAttribute("aria-label", label);
+                // A number box next to each slider, so exact values can be typed.
+                // Percentages are typed as whole percent (5 means 5%).
+                const box = document.createElement("span"); box.className = "param-box";
+                const number = document.createElement("input");
+                number.type = "number"; number.id = `value-${key}`;
+                number.setAttribute("aria-label", `${label} value`);
+                const toBox = n => percent ? Math.round(Number(n) * 100) : Number(n);
+                const fromBox = n => percent ? Number(n) / 100 : Number(n);
+                number.min = toBox(min); number.max = toBox(max); number.step = percent ? 1 : step;
+                number.value = toBox(input.value);
+                box.append(number);
+                if (percent) box.append("%");
+                const setValue = raw => {
+                    activePending[configKey(key)] = percent ? raw : (Number.isInteger(step) ? Math.round(raw) : raw);
+                    markCustom();
+                };
+                input.addEventListener("input", () => {
+                    number.value = toBox(input.value);
+                    setValue(Number(input.value));
+                });
+                number.addEventListener("change", () => {
+                    if (number.value === "" || Number.isNaN(Number(number.value))) { number.value = toBox(input.value); return; }
+                    const top = Number(input.max), bottom = Number(input.min);
+                    const raw = Math.min(top, Math.max(bottom, fromBox(number.value)));
+                    input.value = raw;
+                    number.value = toBox(raw);
+                    setValue(raw);
+                    applyLimits();
+                });
+                wrap.dataset.key = key;
+                wrap.append(caption, box, input); parameterControls.append(wrap);
+            });
+            fillRunOptions();
+            applyLimits();
+            fillPresets(model);
+            validationErrors.textContent = "";
+        }
+
+        [gridWidthInput, gridHeightInput, schedulerInput, wrapEdgesInput].forEach(input => input.addEventListener("change", markCustom));
+
+        // Keeps the agent sliders inside what the grid can hold, so the whole
+        // slider range is usable. Infected agents can't be more than all agents.
+        function applyLimits() {
+            if (!activePending) return;
+            const width = Number(gridWidthInput.value) || activePending.gridWidth;
+            const height = Number(gridHeightInput.value) || activePending.gridHeight;
+            const cells = Math.max(1, width * height);
+            const limits = {
+                AgentCount: cells,
+                InitialSheep: cells,
+                InitialWolves: cells,
+                InitialInfected: Math.min(cells, activePending.agentCount ?? cells)
+            };
+            parameterControls.querySelectorAll(".parameter-control").forEach(wrap => {
+                const top = limits[wrap.dataset.key];
+                if (top === undefined) return;
+                const slider = wrap.querySelector('input[type="range"]');
+                const number = wrap.querySelector('input[type="number"]');
+                slider.max = top; number.max = top;
+                const value = activePending[configKey(wrap.dataset.key)];
+                if (value > top) {
+                    activePending[configKey(wrap.dataset.key)] = top;
+                    slider.value = top; number.value = top;
+                }
+            });
+        }
+        [gridWidthInput, gridHeightInput].forEach(input => input.addEventListener("input", applyLimits));
+        parameterControls.addEventListener("input", e => {
+            if (e.target.closest?.('[data-key="AgentCount"]')) applyLimits();
+        });
+
+        // One shared tooltip, positioned on screen, so panels that scroll can't clip it.
+        const tipBox = document.getElementById("tipBox");
+
+        // Shows the tooltip above (or below, if there is no room) an "i" icon.
+        function showTip(icon) {
+            tipBox.textContent = icon.dataset.tip;
+            tipBox.hidden = false;
+            const r = icon.getBoundingClientRect();
+            const box = tipBox.getBoundingClientRect();
+            const left = Math.min(window.innerWidth - box.width - 8, Math.max(8, r.left + r.width / 2 - box.width / 2));
+            const top = r.top - box.height - 8 < 8 ? r.bottom + 8 : r.top - box.height - 8;
+            tipBox.style.left = `${left}px`;
+            tipBox.style.top = `${top}px`;
+        }
+
+        document.addEventListener("mouseover", e => {
+            const icon = e.target.closest?.(".info");
+            if (icon) showTip(icon); else tipBox.hidden = true;
+        });
+        document.addEventListener("focusin", e => { if (e.target.classList?.contains("info")) showTip(e.target); });
+        document.addEventListener("focusout", e => { if (e.target.classList?.contains("info")) tipBox.hidden = true; });
+        // Clicking the i inside a switch's label shouldn't flip the switch.
+        document.addEventListener("click", e => { if (e.target.closest?.(".info")) e.preventDefault(); });
+
+        // ---- 3. Save image buttons -----------------------------------------
+
+        // Saves a canvas as a PNG on a solid background, so it isn't see-through in other programs.
+        function saveCanvasImage(source, name, background) {
+            const copy = document.createElement("canvas");
+            copy.width = source.width;
+            copy.height = source.height;
+            const c = copy.getContext("2d");
+            c.fillStyle = background;
+            c.fillRect(0, 0, copy.width, copy.height);
+            c.drawImage(source, 0, 0);
+            copy.toBlob(blob => {
+                const link = document.createElement("a");
+                link.href = URL.createObjectURL(blob);
+                link.download = name;
+                link.click();
+                setTimeout(() => URL.revokeObjectURL(link.href), 1000);
+            }, "image/png");
+        }
+
+        // A file name like "WolfSheep-grid-tick-120.png".
+        function imageName(part) {
+            const model = currentRun ? currentRun.model : modelSelect.value;
+            const tick = (tickCounter.textContent.match(/Tick (\d+)/) || [])[1];
+            return `${model}-${part}${tick ? `-tick-${tick}` : ""}.png`;
+        }
+
+        document.getElementById("saveGridImage").addEventListener("click", () => {
+            saveCanvasImage(canvas, imageName("grid"), getComputedStyle(canvas).backgroundColor || "#ffffff");
+        });
+
+        document.getElementById("saveChartImage").addEventListener("click", () => {
+            const panel = document.querySelector(".chart-panel");
+            saveCanvasImage(document.getElementById("statsChart"), imageName("chart"), getComputedStyle(panel).backgroundColor || "#ffffff");
+        });
+
+        // ---- 4. Chart and dark mode ------------------------------------------
+
+        let currentRun = null;          // the RunInfo of the run on screen (from SimulationStarted), or null
+        let currentStatus = "Stopped";  // the latest SimulationStatus
+
+        // Line colours, handed out in order to series without a fixed colour.
+        const seriesColors = [
+            "rgba(54,162,235,1)", "rgba(255,99,132,1)", "rgba(75,192,192,1)",
+            "rgba(255,193,7,1)", "rgba(155,89,182,1)", "rgba(23,162,184,1)"
+        ];
+        // Fixed colours for some values, so sheep are always yellow and wolves dark.
+        const modelMetricColors = {
+            Sheep: "rgba(241,196,15,1)",
+            Wolves: "rgba(52,73,94,1)"
+        };
+
+        // Colours too dark to see on the dark background get a lighter version.
+        const darkModeColors = {
+            Wolves: "rgba(143,163,191,1)"
+        };
+
+        // The fixed colour for a value in the current theme, or undefined.
+        function metricColor(key) {
+            const dark = document.documentElement.dataset.theme === "dark";
+            return (dark && darkModeColors[key]) || modelMetricColors[key];
+        }
+
+        // Text and grid-line colours for the current theme.
+        function themeColors() {
+            const dark = document.documentElement.dataset.theme === "dark";
+            return { text: dark ? "#c3cad8" : "#555555", grid: dark ? "rgba(255,255,255,0.10)" : "rgba(0,0,0,0.10)" };
+        }
+
+        // Default text and grid-line colours for every chart on the page.
+        Chart.defaults.color = themeColors().text;
+        Chart.defaults.borderColor = themeColors().grid;
+
+        // The live chart. Axes: "y" for counts, "y1" (0 to 1, hidden unless
+        // needed) for fractions like Schelling's happy fraction, and "y2" for
+        // grass, which is far bigger than the animal counts.
+        //
+        // Every tick of the run is kept as an {x, y} point. Once a series has
+        // more points than the chart has pixels, Chart.js's decimation plugin
+        // thins them at draw time (LTTB keeps the curve's shape and peaks),
+        // so a long run stays fully visible without slowing the chart down.
+        // Decimation requires parsing: false and a linear x axis.
+        const chartData = { datasets: [] };
+        const statsChart = new Chart(document.getElementById("statsChart").getContext("2d"), {
+            type: "line",
+            data: chartData,
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                animation: false,
+                parsing: false,
+                plugins: {
+                    decimation: { enabled: true, algorithm: "lttb" }
+                },
+                scales: {
+                    x: { type: "linear", title: { display: true, text: "Tick" }, ticks: { precision: 0 } },
+                    y: { title: { display: true, text: "Count" }, beginAtZero: true },
+                    y1: {
+                        position: "right",
+                        min: 0,
+                        max: 1,
+                        display: false,
+                        title: { display: true, text: "Fraction" },
+                        grid: { drawOnChartArea: false }
+                    },
+                    y2: {
+                        position: "right",
+                        beginAtZero: true,
+                        display: false,
+                        title: { display: true, text: "Grass cells" },
+                        grid: { drawOnChartArea: false }
+                    }
+                }
+            }
+        });
+        // Holds each series' full point array. Once decimation kicks in,
+        // Chart.js swaps dataset.data for the thinned copy, so new points must
+        // be pushed onto these original arrays rather than onto dataset.data.
+        let pointsByKey = {};
+
+        const themeToggle = document.getElementById("themeToggle");
+
+        // Makes the dark-mode switch match the current theme.
+        function showThemeButton() {
+            themeToggle.checked = document.documentElement.dataset.theme === "dark";
+        }
+
+        // Switches light/dark mode: remembers it, recolours the chart lines,
+        // monitors and every chart's text and grid lines.
+        function applyTheme(theme) {
+            document.documentElement.dataset.theme = theme;
+            try { localStorage.setItem("abmTheme", theme); } catch { }
+            const colors = themeColors();
+            statsChart.data.datasets.forEach(ds => {
+                const c = metricColor(ds.metricKey);
+                if (c) {
+                    ds.borderColor = c;
+                    ds.backgroundColor = c.replace(",1)", ",0.1)");
+                }
+            });
+            document.querySelectorAll(".monitor[data-key]").forEach(box => {
+                const c = metricColor(box.dataset.key);
+                if (c) box.style.borderTopColor = c;
+            });
+            Chart.defaults.color = colors.text;
+            Chart.defaults.borderColor = colors.grid;
+            Object.values(Chart.instances).forEach(chart => {
+                Object.values(chart.options.scales || {}).forEach(scale => {
+                    scale.ticks = { ...scale.ticks, color: colors.text };
+                    scale.title = { ...scale.title, color: colors.text };
+                    scale.grid = { ...scale.grid, color: colors.grid };
+                });
+                if (chart.options.plugins?.legend) {
+                    chart.options.plugins.legend.labels = { ...chart.options.plugins.legend.labels, color: colors.text };
+                }
+                chart.update("none");
+            });
+            showThemeButton();
+        }
+
+        themeToggle.addEventListener("change", () => {
+            applyTheme(themeToggle.checked ? "dark" : "light");
+        });
+
+        showThemeButton();
+
+        // Empties the chart for a new run.
+        function resetChart() {
+            chartData.datasets.length = 0;
+            pointsByKey = {};
+            statsChart.options.scales.y1.display = false;
+            statsChart.options.scales.y2.display = false;
+            statsChart.update("none");
+        }
+
+        // "HappyAgents" -> "Happy Agents".
+        function prettyLabel(key) {
+            return key.replace(/([a-z])([A-Z])/g, "$1 $2");
+        }
+
+        // Returns the points array of a chart line, creating the line the first
+        // time a value appears. So the chart grows its lines from whatever
+        // values the model sends, with no per-model code.
+        function ensureSeries(key) {
+            if (key in pointsByKey) return pointsByKey[key];
+
+            const isFraction = key.includes("Fraction");
+            if (isFraction) statsChart.options.scales.y1.display = true;
+            // Grass runs into the thousands, so it gets its own axis on the
+            // right and doesn't flatten the sheep and wolf lines.
+            const isGrass = key === "Grass";
+            if (isGrass) statsChart.options.scales.y2.display = true;
+
+            const color = metricColor(key) || seriesColors[chartData.datasets.length % seriesColors.length];
+            const points = [];
+            chartData.datasets.push({
+                metricKey: key,
+                label: prettyLabel(key),
+                borderColor: color,
+                backgroundColor: color.replace(",1)", ",0.1)"),
+                data: points,
+                tension: 0.2,
+                pointRadius: 0,
+                yAxisID: isFraction ? "y1" : (isGrass ? "y2" : "y")
+            });
+            pointsByKey[key] = points;
+            return points;
+        }
+
+        // ---- 5. Monitors and adding ticks -------------------------------------
+        // Monitors are the number boxes above the chart, like NetLogo's monitors.
+        // Like the chart lines, a box is created the first time a value appears.
+
+        const monitorsEl = document.getElementById("monitors");
+        let monitorValues = {};
+
+        // Removes every monitor box for a new run.
+        function resetMonitors() {
+            monitorsEl.innerHTML = "";
+            monitorValues = {};
+        }
+
+        // The tooltip text for each monitor.
+        const monitorTips = {
+            Tick: "How many ticks have run. One tick is one round where every agent takes a turn.",
+            Susceptible: "People who have not caught it yet and can still get infected.",
+            Infected: "People who are sick right now and can pass it on to the people next to them.",
+            Recovered: "People who got better. They can't catch it again.",
+            HappyAgents: "Agents with enough neighbours like them, so they stay where they are.",
+            UnhappyAgents: "Agents with too few neighbours like them. They move to an empty cell.",
+            HappyFraction: "The share of agents that are happy. Once it reaches 100% nobody moves anymore.",
+            AverageSpeed: "How fast the birds are flying on average, in cells per tick.",
+            FlockRadius: "How spread out the birds are from the middle of the group. Smaller means a tighter flock.",
+            FoodCollected: "Food the ants have carried back to the nest so far.",
+            FoodRemaining: "Food still left in the piles.",
+            AntsCarryingFood: "Ants walking back to the nest with food right now.",
+            Sheep: "Sheep alive right now.",
+            Wolves: "Wolves alive right now.",
+            Grass: "Cells that have grass right now (the green ones)."
+        };
+
+        // The "i" icon HTML for a monitor, if it has a tip.
+        function monitorTip(key) {
+            const text = monitorTips[key];
+            return text ? `<span class="info" tabindex="0" data-tip="${text}">i</span>` : "";
+        }
+
+        // A monitor's title. Fractions are shown as percentages: "Happy %".
+        function monitorLabel(key) {
+            return key.endsWith("Fraction") ? prettyLabel(key.slice(0, -"Fraction".length)) + " %" : prettyLabel(key);
+        }
+
+        // A monitor's value: 45.2% for fractions, 1,234 for counts, 3.14 otherwise.
+        function formatMonitor(key, value) {
+            if (key.endsWith("Fraction")) return (value * 100).toFixed(1) + "%";
+            return Number.isInteger(value) ? value.toLocaleString() : value.toFixed(2);
+        }
+
+        // Updates one monitor box, creating it the first time.
+        function setMonitor(key, value) {
+            if (!(key in monitorValues)) {
+                const box = document.createElement("div");
+                box.className = "monitor";
+                const color = metricColor(key) || seriesColors[(Object.keys(monitorValues).length - 1 + seriesColors.length) % seriesColors.length];
+                box.style.borderTopColor = key === "Tick" ? "#888" : color;
+                box.dataset.key = key;
+                box.innerHTML = `<div class="monitor-label">${monitorLabel(key)}${monitorTip(key)}</div><div class="monitor-value"></div>`;
+                monitorsEl.appendChild(box);
+                monitorValues[key] = box.querySelector(".monitor-value");
+            }
+            monitorValues[key].textContent = formatMonitor(key, value);
+        }
+
+        // Updates the Tick box and every value box.
+        function updateMonitors(tickNumber, values) {
+            setMonitor("Tick", tickNumber);
+            Object.entries(values).forEach(([key, value]) => setMonitor(key, value));
+        }
+
+        // Handles one "ReceiveTick": updates the monitors, adds a point to every
+        // chart line and asks for a redraw on the next screen frame. SIR's
+        // S/I/R come as separate fields, every other model uses tick.metrics.
+        function addTick(tick) {
+            const values = currentRun && currentRun.model === "SIR"
+                ? { Susceptible: tick.susceptible, Infected: tick.infected, Recovered: tick.recovered }
+                : {};
+            Object.assign(values, tick.metrics || {});
+            updateMonitors(tick.tick + 1, values);
+
+            Object.entries(values).forEach(([key, value]) => {
+                ensureSeries(key).push({ x: tick.tick, y: value });
+            });
+
+            chartNeedsUpdate = true;
+            queueFrame();
+        }
+
+        // At fast speeds the server sends far more ticks than the screen can show.
+        // Ticks are still all added to the chart, but the chart and the grid are only
+        // redrawn once per screen frame, using the newest grid, so nothing piles up.
+        let chartNeedsUpdate = false;
+        let pendingGrid = null;
+        let frameQueued = false;
+
+        // Asks the browser to redraw once on its next frame (requestAnimationFrame).
+        function queueFrame() {
+            if (frameQueued) return;
+            frameQueued = true;
+            requestAnimationFrame(() => {
+                frameQueued = false;
+                if (chartNeedsUpdate) {
+                    chartNeedsUpdate = false;
+                    statsChart.update("none");
+                }
+                const grid = pendingGrid;
+                pendingGrid = null;
+                if (grid && currentRun && grid.runId === currentRun.runId) drawGrid(grid);
+            });
+        }
+
+        // Many ticks at once (a continued run being shown again), with one chart redraw at the end.
+        function addTicks(ticks) {
+            ticks.forEach(tick => {
+                const values = currentRun && currentRun.model === "SIR"
+                    ? { Susceptible: tick.susceptible, Infected: tick.infected, Recovered: tick.recovered }
+                    : {};
+                Object.assign(values, tick.metrics || {});
+                Object.entries(values).forEach(([key, value]) => ensureSeries(key).push({ x: tick.tick, y: value }));
+                if (tick === ticks[ticks.length - 1]) updateMonitors(tick.tick + 1, values);
+            });
+            statsChart.update("none");
+        }
+
+        // ---- 6. Run status, new runs and Continue -----------------------------
+
+        // Called from Past runs: shows the run's settings, then asks the server
+        // to replay it to where it stopped.
+        async function continueSavedRun(run) {
+            pendingConfigs[run.model] = { ...run.configuration, randomSeed: run.seed };
+            modelSelect.value = run.model;
+            activePending = null;
+            renderConfiguration(run.model);
+            validationErrors.textContent = "";
+            const problem = await connection.invoke("ContinueSimulation", run.id);
+            if (problem) validationErrors.textContent = problem;
+        }
+
+        // Handles "SimulationStatus": updates the badge and which buttons work.
+        // The Run button doubles as Pause while running.
+        function setStatus(status) {
+            currentStatus = status;
+            statusBadge.textContent = status;
+            statusBadge.className = "status " + status;
+
+            const running = status === "Running";
+            const waiting = status === "Ready" || status === "Paused";
+            goButton.disabled = !(running || waiting);
+            goButton.textContent = running ? "Pause" : "Run";
+            goButton.classList.toggle("running", running);
+            stepButton.disabled = !waiting;
+            resetButton.disabled = status === "Stopped";
+        }
+
+        // Handles "SimulationStarted": a new run, so reset the title, chart, monitors and grid.
+        function showRun(run) {
+            currentRun = run;
+            modelTitle.textContent = run.displayName;
+            modelDescription.textContent = run.description;
+            chartTitle.textContent = run.displayName + " statistics";
+            tickCounter.textContent = `Tick 0 / ${run.tickLimit}`;
+            document.title = run.displayName + " - ABM Framework Dashboard";
+            modelSelect.value = run.model;
+            downloadButton.disabled = false;
+            resetChart();
+            resetMonitors();
+            hideInspector();
+            setGridSize(run.gridWidth, run.gridHeight);
+            updateDisplaySwitches();
+        }
+
+        // Handles "SimulationReset": no run any more, so clear everything.
+        function showNoRun() {
+            currentRun = null;
+            downloadButton.disabled = true;
+            modelTitle.textContent = "No simulation running";
+            modelDescription.textContent = "Pick a model, press Setup, then Run.";
+            chartTitle.textContent = "Statistics";
+            tickCounter.textContent = "";
+            document.title = "ABM Framework Dashboard";
+            resetChart();
+            resetMonitors();
+            clearGrid();
+            hideInspector();
+            updateDisplaySwitches();
+        }
+
+        // ---- 7. Display switches and the Agent inspector --------------------
+
+        // Display switches only change how the grid is drawn, so they apply
+        // instantly (even while paused) and never touch the server.
+        const displaySwitches = document.getElementById("displaySwitches");
+        const energyHint = document.getElementById("energyHint");
+
+        // Shows only the switches that apply to the current model (each switch
+        // lists its models in data-models), and the hint when energy labels
+        // don't fit because the cells are too small.
+        function updateDisplaySwitches() {
+            const model = currentRun ? currentRun.model : modelSelect.value;
+            let anyVisible = false;
+            displaySwitches.querySelectorAll(".switch").forEach(sw => {
+                const visible = sw.dataset.models.split(",").includes(model);
+                sw.hidden = !visible;
+                anyVisible = anyVisible || visible;
+            });
+            displaySwitches.classList.toggle("none", !anyVisible);
+            energyHint.hidden = !(model === "WolfSheep" && displayOptions.showEnergy && cellSize < minLabelCellSize);
+        }
+
+        displaySwitches.querySelectorAll("input[data-option]").forEach(input => {
+            displayOptions[input.dataset.option] = input.checked;
+            input.addEventListener("change", () => {
+                displayOptions[input.dataset.option] = input.checked;
+                updateDisplaySwitches();
+                redrawGrid();
+            });
+        });
+
+        modelSelect.addEventListener("change", () => {
+            renderConfiguration(modelSelect.value);
+            if (!currentRun) updateDisplaySwitches();
+        });
+
+        const inspector = document.getElementById("inspector");
+
+        // The "Type" shown in the inspector, by icon shape.
+        const agentTypes = {
+            person: "Person",
+            happy: "Resident",
+            unhappy: "Resident",
+            boid: "Boid",
+            ant: "Ant",
+            antWithFood: "Ant",
+            sheep: "Sheep",
+            wolf: "Wolf"
+        };
+
+        // A boid's heading as degrees and a compass point, e.g. "90° (E)".
+        // Screen y points down, so +90 turns "0 = right" into "0 = north".
+        function compass(heading) {
+            const degrees = (heading * 180 / Math.PI + 90 + 360) % 360;
+            const points = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"];
+            return `${Math.round(degrees)}° (${points[Math.round(degrees / 45) % 8]})`;
+        }
+
+        const inspectHint = document.getElementById("inspectHint");
+
+        // Empties the inspector and shows the "click an agent" hint again.
+        function hideInspector() {
+            inspector.hidden = true;
+            inspector.innerHTML = "";
+            inspectHint.hidden = false;
+        }
+
+        // Puts cards into the inspector and hides the hint.
+        function showInspector(html) {
+            inspector.innerHTML = html;
+            inspector.hidden = false;
+            inspectHint.hidden = true;
+        }
+
+        // "Clear all": deselects everything.
+        function closeInspector() {
+            selectAgent(null);
+            hideInspector();
+        }
+
+        // The × on one card: stops watching that agent.
+        function removeFromInspector(id) {
+            setSelection(selectedAgentIds.filter(other => other !== id));
+            if (selectedAgentIds.length === 0) hideInspector();
+        }
+
+        let inspectorNote = "";   // a message shown above the cards, e.g. "up to 6 agents"
+
+        // One agent's card: type, state, position and, if the model has them, energy, heading and speed.
+        function inspectorCard(id, index) {
+            const ring = `<span class="ring-dot" style="border-color:${selectionColor(index)}" title="Ring colour on the grid"></span>`;
+            const closeButton = `<button class="inspector-close" title="Remove" onclick="removeFromInspector(${id})">&times;</button>`;
+            const a = lastAgents.find(agent => agent.id === id);
+
+            if (!a) {
+                return `<div class="inspector-card" style="border-left-color:#999">${closeButton}<h4>${ring}Agent #${id}</h4>
+                    <div>This agent is no longer in the simulation.</div></div>`;
+            }
+
+            const style = styleFor(a.state);
+            const rows = [
+                ["Type", agentTypes[style.icon] || "Agent"],
+                ["State", style.label],
+                ["Position", `(${a.x}, ${a.y})`]
+            ];
+            if (typeof a.energy === "number") rows.push(["Energy", a.energy.toFixed(1)]);
+            if (typeof a.heading === "number") rows.push(["Heading", compass(a.heading)]);
+            if (typeof a.speed === "number") rows.push(["Speed", `${a.speed.toFixed(2)} cells/tick`]);
+
+            return `<div class="inspector-card" style="border-left-color:${style.color}">${closeButton}<h4>${ring}Agent #${a.id}</h4>
+                <dl>${rows.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join("")}</dl></div>`;
+        }
+
+        // Redraws the inspector after every grid frame, so the values stay live.
+        function renderInspector() {
+            if (selectedAgentIds.length === 0) {
+                hideInspector();
+                return;
+            }
+
+            const count = selectedAgentIds.length;
+            const bar = count > 1 || inspectorNote
+                ? `<div class="inspector-bar"><span>${inspectorNote || `Watching ${count} agents`}</span>${count > 1 ? `<button onclick="closeInspector()">Clear all</button>` : ""}</div>`
+                : "";
+
+            showInspector(bar + selectedAgentIds.map(inspectorCard).join(""));
+        }
+
+        // ---- 8. Layout: resizable columns and draggable panels ----------------
+
+        // Column widths and the inspector height can be dragged on the
+        // "gutters" between them. Sizes are remembered in localStorage.
+        // Double-click a gutter to reset it. Wrapped in (() => { ... })() so its
+        // helper functions stay private. Returns { apply, reset }.
+        const layout = (() => {
+            const main = document.querySelector("main");
+            const rightColumn = document.getElementById("rightColumn");
+            const inspectorPanel = document.getElementById("inspectorSlot");
+            const storageKey = "abmDashboardLayout";
+            let sizes = {};
+
+            try { sizes = JSON.parse(localStorage.getItem(storageKey)) || {}; } catch { sizes = {}; }
+
+            function save() {
+                try { localStorage.setItem(storageKey, JSON.stringify(sizes)); } catch { }
+            }
+
+            function clamp(value, min, max) {
+                return Math.max(min, Math.min(max, value));
+            }
+
+            function apply() {
+                const inner = main.clientWidth - 40 - 28;
+                if (sizes.left) sizes.left = clamp(sizes.left, 220, Math.max(220, inner - 560));
+                if (sizes.middle) sizes.middle = clamp(sizes.middle, 280, Math.max(280, inner - (sizes.left || 290) - 280));
+
+                main.style.setProperty("--left", sizes.left ? `${sizes.left}px` : "");
+                main.style.setProperty("--middle", sizes.middle ? `${sizes.middle}px` : "");
+                if (!sizes.left) main.style.removeProperty("--left");
+                if (!sizes.middle) main.style.removeProperty("--middle");
+
+                if (sizes.inspector) {
+                    sizes.inspector = clamp(sizes.inspector, 110, Math.max(110, rightColumn.clientHeight - 260));
+                    inspectorPanel.style.setProperty("--inspector-height", `${sizes.inspector}px`);
+                } else {
+                    inspectorPanel.style.removeProperty("--inspector-height");
+                }
+            }
+
+            function startDrag(gutter, event) {
+                const which = gutter.dataset.resize;
+                const columns = gutter.previousElementSibling.getBoundingClientRect();
+                const grabX = event.clientX - columns.right;
+                const grabY = rightColumn.getBoundingClientRect().bottom - event.clientY - inspectorPanel.offsetHeight;
+                event.preventDefault();
+                gutter.setPointerCapture(event.pointerId);
+                gutter.classList.add("dragging");
+                document.body.classList.add("resizing", which === "inspector" ? "rows" : "cols");
+
+                const move = e => {
+                    if (which === "inspector") {
+                        sizes.inspector = rightColumn.getBoundingClientRect().bottom - e.clientY - grabY;
+                    } else {
+                        sizes[which] = e.clientX - columns.left - grabX;
+                    }
+                    apply();
+                };
+
+                const stop = () => {
+                    gutter.classList.remove("dragging");
+                    document.body.classList.remove("resizing", "rows", "cols");
+                    gutter.removeEventListener("pointermove", move);
+                    gutter.removeEventListener("pointerup", stop);
+                    gutter.removeEventListener("pointercancel", stop);
+                    save();
+                };
+
+                gutter.addEventListener("pointermove", move);
+                gutter.addEventListener("pointerup", stop);
+                gutter.addEventListener("pointercancel", stop);
+            }
+
+            document.querySelectorAll(".gutter").forEach(gutter => {
+                gutter.addEventListener("pointerdown", e => startDrag(gutter, e));
+                gutter.addEventListener("dblclick", () => {
+                    delete sizes[gutter.dataset.resize];
+                    apply();
+                    save();
+                });
+            });
+
+            window.addEventListener("resize", apply);
+            apply();
+
+            function reset() {
+                sizes = {};
+                apply();
+                save();
+            }
+
+            return { apply, reset };
+        })();
+
+        // Panels can be dragged by their grip onto another panel to swap places.
+        // Which panel is in which "slot" is remembered in localStorage too.
+        // Returns { reset, current }.
+        const panelLayout = (() => {
+            const storageKey = "abmPanelSlots";
+            const slots = [...document.querySelectorAll(".slot")];
+            const panelIn = slot => slot.querySelector(":scope > [data-panel]");
+            const defaults = Object.fromEntries(slots.map(s => [s.dataset.slot, panelIn(s).dataset.panel]));
+            let dragging = null;
+
+            function current() {
+                return Object.fromEntries(slots.map(s => [s.dataset.slot, panelIn(s).dataset.panel]));
+            }
+
+            function place(map) {
+                const panels = Object.fromEntries(slots.map(s => [panelIn(s).dataset.panel, panelIn(s)]));
+                const wanted = slots.map(s => map?.[s.dataset.slot]);
+                if (new Set(wanted).size !== slots.length || !wanted.every(name => name in panels)) return;
+                slots.forEach(s => s.appendChild(panels[map[s.dataset.slot]]));
+            }
+
+            function save() {
+                try { localStorage.setItem(storageKey, JSON.stringify(current())); } catch { }
+            }
+
+            try { place(JSON.parse(localStorage.getItem(storageKey))); } catch { }
+
+            function clearTargets() {
+                slots.forEach(s => s.classList.remove("drop-target"));
+            }
+
+            document.querySelectorAll(".panel-grip").forEach(grip => {
+                grip.draggable = true;
+                grip.addEventListener("dragstart", e => {
+                    dragging = grip.closest("[data-panel]");
+                    e.dataTransfer.effectAllowed = "move";
+                    e.dataTransfer.setData("text/plain", dragging.dataset.panel);
+                    e.dataTransfer.setDragImage(dragging, 24, 24);
+                    document.body.classList.add("moving-panel");
+                });
+                grip.addEventListener("dragend", () => {
+                    dragging = null;
+                    document.body.classList.remove("moving-panel");
+                    clearTargets();
+                });
+            });
+
+            slots.forEach(slot => {
+                slot.addEventListener("dragover", e => {
+                    if (!dragging) return;
+                    e.preventDefault();
+                    slots.forEach(s => s.classList.toggle("drop-target", s === slot && panelIn(s) !== dragging));
+                });
+                slot.addEventListener("dragleave", e => {
+                    if (!slot.contains(e.relatedTarget)) slot.classList.remove("drop-target");
+                });
+                slot.addEventListener("drop", e => {
+                    e.preventDefault();
+                    const other = panelIn(slot);
+                    if (dragging && other && other !== dragging) {
+                        const from = dragging.parentElement;
+                        from.appendChild(other);
+                        slot.appendChild(dragging);
+                        save();
+                    }
+                    clearTargets();
+                });
+            });
+
+            function reset() {
+                try { localStorage.removeItem(storageKey); } catch { }
+                place(defaults);
+            }
+
+            return { reset, current };
+        })();
+
+        document.getElementById("resetLayoutButton").addEventListener("click", () => {
+            panelLayout.reset();
+            layout.reset();
+        });
+
+        const gridBox = document.getElementById("gridBox");
+
+        // Makes the grid as big as its box allows (called whenever the box changes size).
+        function fitGrid() {
+            fitGridTo(Math.min(gridBox.clientWidth, gridBox.clientHeight) - 2);
+        }
+
+        new ResizeObserver(fitGrid).observe(gridBox);
+
+        // grid.js calls this after drawing each frame.
+        function onGridDrawn() {
+            renderInspector();
+        }
+
+        // ---- 9. Clicking agents on the grid ----------------------------------
+        // Click: inspect the agents on that cell. Ctrl/Shift/Cmd+click: add or
+        // remove them from the watched set (up to MAX_SELECTED).
+        canvas.addEventListener("click", event => {
+            if (!lastGrid) return;
+
+            const cell = cellFromEvent(event);
+            const here = agentsAtCell(cell.x, cell.y);
+
+            const adding = event.ctrlKey || event.metaKey || event.shiftKey;
+            inspectorNote = "";
+
+            if (here.length === 0) {
+                if (!adding) closeInspector();
+                return;
+            }
+
+            if (!adding) {
+                setSelection(here.slice(0, MAX_SELECTED).map(a => a.id));
+                return;
+            }
+
+            const notYet = here.find(a => !selectedAgentIds.includes(a.id));
+            if (!notYet) {
+                setSelection(selectedAgentIds.filter(id => !here.some(a => a.id === id)));
+            } else if (selectedAgentIds.length >= MAX_SELECTED) {
+                inspectorNote = `You can watch up to ${MAX_SELECTED} agents at a time.`;
+                renderInspector();
+            } else {
+                setSelection([...selectedAgentIds, notYet.id]);
+            }
+        });
+
+        // ---- 10. SignalR: talking to the server -------------------------------
+        // connection.on("Name", ...) handles a message the server sends.
+        // connection.invoke("Name", ...) calls a SimulationHub method.
+        // Every tick and grid message carries runId, so late messages from a
+        // run that was already replaced are ignored.
+        const connection = new signalR.HubConnectionBuilder()
+            .withUrl("/simulationHub")
+            .withAutomaticReconnect()
+            .build();
+
+        connection.on("SimulationStarted", showRun);
+        connection.on("SimulationReset", showNoRun);
+        connection.on("SimulationStatus", setStatus);
+
+        connection.on("SpeedChanged", delayMs => {
+            speedSlider.value = levelForDelay(delayMs);
+            showSpeed(delayMs);
+        });
+
+        connection.on("ReceiveTick", tick => {
+            if (!currentRun || tick.runId !== currentRun.runId) return;
+            tickCounter.textContent = `Tick ${tick.tick + 1} / ${currentRun.tickLimit}`;
+            addTick(tick);
+        });
+
+        // A continued run arrives with all its ticks at once.
+        connection.on("ReceiveTickHistory", ticks => {
+            if (!currentRun || ticks.length === 0 || ticks[0].runId !== currentRun.runId) return;
+            tickCounter.textContent = `Tick ${ticks[ticks.length - 1].tick + 1} / ${currentRun.tickLimit}`;
+            addTicks(ticks);
+        });
+
+        connection.on("SimulationNotice", message => {
+            validationErrors.textContent = message;
+        });
+
+        // Keep only the newest grid. queueFrame draws it on the next screen frame.
+        connection.on("ReceiveGrid", grid => {
+            if (!currentRun || grid.runId !== currentRun.runId) return;
+            pendingGrid = grid;
+            queueFrame();
+        });
+
+        // Setup: check the boxes, then send the settings. The server builds the
+        // run and waits at tick 0. Server-side errors are shown in red.
+        setupButton.addEventListener("click", () => {
+            const problem = checkRunOptions();
+            validationErrors.textContent = problem || "";
+            if (problem) return;
+
+            readRunOptions();
+            pendingConfigs[modelSelect.value] = activePending;
+            connection.invoke("SetupSimulation", activePending).catch(err => {
+                const message = err.message || "Simulation settings are invalid.";
+                validationErrors.textContent = message.replace(/^.*HubException:\s*/s, "");
+            });
+        });
+
+        // Run / Pause (the same button).
+        goButton.addEventListener("click", () => {
+            const method = currentStatus === "Running" ? "PauseSimulation" : "ResumeSimulation";
+            connection.invoke(method).catch(err => console.error(err));
+        });
+
+        stepButton.addEventListener("click", () => {
+            connection.invoke("StepSimulation").catch(err => console.error(err));
+        });
+
+        resetButton.addEventListener("click", () => {
+            connection.invoke("ResetSimulation").catch(err => console.error(err));
+        });
+
+        // ---- 11. Download menu and start-up -----------------------------------
+
+        // Fetches the file rather than navigating to it, so a failed download
+        // shows a message instead of replacing the dashboard with an error page.
+        const downloadOptions = document.getElementById("downloadOptions");
+
+        function showDownloadOptions(open) {
+            downloadOptions.hidden = !open;
+            downloadButton.setAttribute("aria-expanded", String(open));
+        }
+
+        downloadButton.addEventListener("click", () => showDownloadOptions(downloadOptions.hidden));
+        document.addEventListener("click", e => {
+            if (!e.target.closest(".download-menu")) showDownloadOptions(false);
+        });
+
+        downloadOptions.addEventListener("click", async e => {
+            const option = e.target.closest("button[data-format]");
+            if (!option || !currentRun) return;
+            showDownloadOptions(false);
+            const format = option.dataset.format;
+            try {
+                const response = await fetch(`api/simulation/ticks.${format}?runId=${currentRun.runId}`);
+                if (!response.ok) throw new Error(await response.text() || response.statusText);
+
+                const disposition = response.headers.get("Content-Disposition") || "";
+                const match = disposition.match(/filename="?([^";]+)"?/);
+                const link = document.createElement("a");
+                link.href = URL.createObjectURL(await response.blob());
+                link.download = match ? match[1] : `simulation-ticks.${format}`;
+                link.click();
+                URL.revokeObjectURL(link.href);
+            } catch (err) {
+                console.error(err);
+                validationErrors.textContent = "Could not download the file: " + err.message;
+            }
+        });
+
+        // The new speed is sent 120 ms after the slider stops moving, instead of
+        // on every pixel of the drag.
+        speedSlider.addEventListener("input", () => {
+            const delayMs = speedLevels[speedSlider.value - 1];
+            showSpeed(delayMs);
+            clearTimeout(speedTimer);
+            speedTimer = setTimeout(() => {
+                connection.invoke("SetSpeed", delayMs).catch(err => console.error(err));
+            }, 120);
+        });
+
+        showSpeed(speedLevels[speedSlider.value - 1]);
+
+        // Start-up: connect to the server, load the models and their defaults,
+        // and build the settings panel. If a run is already going (another tab
+        // started it), SimulationStarted arrives first and shows it.
+        async function init() {
+            try {
+                await connection.start();
+                const models = await connection.invoke("GetModels");
+                modelDefaults = await connection.invoke("GetModelDefaults");
+                modelSelect.innerHTML = models
+                    .map(m => `<option value="${m.model}">${m.displayName}</option>`)
+                    .join("");
+                if (currentRun) modelSelect.value = currentRun.model;
+                renderConfiguration(modelSelect.value);
+                updateDisplaySwitches();
+            } catch (err) {
+                console.error(err);
+                modelDescription.textContent = "Could not connect to the simulation server.";
+            }
+        }
+
+        init();
+    </script>
+</body>
+</html>

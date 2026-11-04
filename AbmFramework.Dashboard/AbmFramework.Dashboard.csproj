@@ -1,0 +1,20 @@
+﻿<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+	<TargetFramework>net8.0</TargetFramework>
+	<Nullable>enable</Nullable>
+	<ImplicitUsings>enable</ImplicitUsings>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\ABM.Persistence\ABM.Persistence.csproj" />
+    <ProjectReference Include="..\config-module\AbmFramework.Engine\AbmFramework.Engine.csproj" />
+	<ProjectReference Include="..\config-module\AbmFramework.Config\AbmFramework.Config.csproj" />
+	  <ProjectReference Include="..\ABM.Core\ABM.Core.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Folder Include="Controllers\" />
+  </ItemGroup>
+
+</Project>
