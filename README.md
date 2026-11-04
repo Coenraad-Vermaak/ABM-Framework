@@ -131,12 +131,12 @@ Built in 2026 by Dinos Group 1 for PRJ381 at Belgium Campus iTversity.
 **Supervisors:** Mr. Dino Giovannoni and Mr. Simba Zengeni
 
 **Team:**
-- Clarissa Bierman
-- Thato Goqo
-- Cornelius Greeff
-- Eduard Herman
-- Lethabo Maine
-- Marco Rentroia
-- Coenraad Vermaak
+- [Clarissa Bierman](https://github.com/ClarissaBierman) 
+- [Thato Goqo](https://github.com/Th4to20)
+- [Cornelius Greeff](https://github.com/GhostBranch404)
+- [Eduard Herman](https://github.com/Eduard-11)
+- [Lethabo Maine](https://github.com/Lethebe-Maine)
+- [Marco Rentroia](https://github.com/Ooocram)
+- [Coenraad Vermaak](https://github.com/Coenraad-Vermaak)
 
 Next year's group: see [docs/KNOWN-ISSUES.md](docs/KNOWN-ISSUES.md) for where we'd start.
